@@ -13,17 +13,19 @@ createApp({
     const banner = ref('')
     const winner = ref('')
     const shake = ref(false)
+    const contactFlash = ref(false)
     const particles = ref([])
     const pressed = new Set()
     let frame = 0
     let last = performance.now()
     let timerId = 0
     let aiClock = 0
+    let hitStopUntil = 0
     let audio = null
 
     const fighters = reactive({
-      blue: { name: 'RANGER RIZ', x: 23, y: 0, vy: 0, health: 100, wins: 0, attack: false, block: false, hit: false, cooldown: 0, facing: 1 },
-      pink: { name: 'SWIFT AMIR', x: 72, y: 0, vy: 0, health: 100, wins: 0, attack: false, block: false, hit: false, cooldown: 0, facing: -1 }
+      blue: { name: 'RANGER RIZ', x: 23, y: 0, vy: 0, health: 100, wins: 0, attack: false, attackKind: '', block: false, hit: false, moving: false, movingUntil: 0, cooldown: 0, facing: 1, combo: 0 },
+      pink: { name: 'SWIFT AMIR', x: 72, y: 0, vy: 0, health: 100, wins: 0, attack: false, attackKind: '', block: false, hit: false, moving: false, movingUntil: 0, cooldown: 0, facing: -1, combo: 0 }
     })
 
     const running = computed(() => screen.value === 'fight')
@@ -45,8 +47,8 @@ createApp({
     }
 
     function resetPositions() {
-      Object.assign(fighters.blue, { x: 23, y: 0, vy: 0, health: 100, attack: false, block: false, hit: false, cooldown: 0, facing: 1 })
-      Object.assign(fighters.pink, { x: 72, y: 0, vy: 0, health: 100, attack: false, block: false, hit: false, cooldown: 0, facing: -1 })
+      Object.assign(fighters.blue, { x: 23, y: 0, vy: 0, health: 100, attack: false, attackKind: '', block: false, hit: false, moving: false, movingUntil: 0, cooldown: 0, facing: 1, combo: 0 })
+      Object.assign(fighters.pink, { x: 72, y: 0, vy: 0, health: 100, attack: false, attackKind: '', block: false, hit: false, moving: false, movingUntil: 0, cooldown: 0, facing: -1, combo: 0 })
       particles.value = []
       time.value = 60
     }
@@ -96,30 +98,37 @@ createApp({
     }
 
     function jump(fighter) {
-      if (!running.value || fighter.y > 0) return
+      if (!running.value || fighter.y > 0 || fighter.hit || fighter.block) return
       fighter.vy = 24
+      fighter.moving = false
       beep(260, .05, 'sine', .02)
     }
 
     function move(fighter, direction, amount = 1.05) {
-      if (!running.value || fighter.hit) return
+      if (!running.value || fighter.hit || fighter.attack || fighter.block) return
       fighter.x = clamp(fighter.x + direction * amount, 8, 88)
+      fighter.moving = true
+      fighter.movingUntil = performance.now() + 120
     }
 
     function setBlock(fighter, value) {
       if (!running.value || fighter.attack || fighter.hit) return
       fighter.block = value
+      fighter.moving = false
     }
 
-    function burst(x, color) {
+    function burst(x, color, type = 'hit') {
       const id = Date.now() + Math.random()
-      particles.value.push({ id, x, color })
-      setTimeout(() => { particles.value = particles.value.filter((p) => p.id !== id) }, 420)
+      const label = type === 'block' ? 'CLANG!' : type === 'dust' ? '' : 'HIT!'
+      particles.value.push({ id, x, color, type, label })
+      setTimeout(() => { particles.value = particles.value.filter((p) => p.id !== id) }, type === 'dust' ? 650 : 520)
     }
 
     function attack(attacker, defender, kind = 'punch') {
       if (!running.value || attacker.cooldown > 0 || attacker.block || attacker.hit) return
       attacker.attack = true
+      attacker.attackKind = kind
+      attacker.moving = false
       attacker.cooldown = kind === 'kick' ? 760 : 520
       beep(kind === 'kick' ? 125 : 180, .06, 'sawtooth', .025)
       setTimeout(() => {
@@ -131,15 +140,28 @@ createApp({
           const damage = blocked ? 2 : (kind === 'kick' ? 13 : 9)
           defender.health = clamp(defender.health - damage, 0, 100)
           defender.hit = !blocked
+          defender.moving = false
           defender.x = clamp(defender.x + attacker.facing * (blocked ? 1.2 : 3), 8, 88)
           shake.value = true
-          burst((attacker.x + defender.x) / 2, blocked ? '#82f7ff' : '#ffd32a')
+          contactFlash.value = true
+          hitStopUntil = performance.now() + (blocked ? 45 : kind === 'kick' ? 105 : 75)
+          burst((attacker.x + defender.x) / 2, blocked ? '#82f7ff' : '#ffd32a', blocked ? 'block' : 'hit')
+          if (!blocked) {
+            attacker.combo += 1
+            defender.combo = 0
+            setTimeout(() => { attacker.combo = 0 }, 950)
+          }
           beep(blocked ? 240 : 78, blocked ? .07 : .14, blocked ? 'triangle' : 'square', .05)
-          setTimeout(() => { defender.hit = false; shake.value = false }, 180)
+          setTimeout(() => { contactFlash.value = false }, 90)
+          setTimeout(() => { shake.value = false }, 210)
+          setTimeout(() => { defender.hit = false }, blocked ? 140 : 360)
           if (defender.health <= 0) finishRound(attacker)
         }
       }, kind === 'kick' ? 190 : 130)
-      setTimeout(() => { attacker.attack = false }, kind === 'kick' ? 360 : 260)
+      setTimeout(() => {
+        attacker.attack = false
+        attacker.attackKind = ''
+      }, kind === 'kick' ? 470 : 340)
     }
 
     async function finishRound(forcedWinner) {
@@ -197,6 +219,10 @@ createApp({
     function loop(now) {
       const dt = Math.min((now - last) / 16.67, 2)
       last = now
+      if (now < hitStopUntil) {
+        frame = requestAnimationFrame(loop)
+        return
+      }
       if (running.value) {
         if (pressed.has('a') || pressed.has('touch-left')) move(fighters.blue, -1, 1.05 * dt)
         if (pressed.has('d') || pressed.has('touch-right')) move(fighters.blue, 1, 1.05 * dt)
@@ -207,10 +233,15 @@ createApp({
         for (const fighter of Object.values(fighters)) {
           fighter.facing = fighter === fighters.blue ? (fighters.pink.x >= fighter.x ? 1 : -1) : (fighters.blue.x >= fighter.x ? 1 : -1)
           fighter.cooldown = Math.max(0, fighter.cooldown - 16.67 * dt)
+          if (fighter.moving && now > fighter.movingUntil) fighter.moving = false
           if (fighter.y > 0 || fighter.vy > 0) {
+            const wasAirborne = fighter.y > 0
             fighter.y = Math.max(0, fighter.y + fighter.vy * .55 * dt)
             fighter.vy -= 1.75 * dt
-            if (fighter.y === 0) fighter.vy = 0
+            if (fighter.y === 0) {
+              fighter.vy = 0
+              if (wasAirborne) burst(fighter.x, '#d9c982', 'dust')
+            }
           }
         }
         if (mode.value === 'cpu') {
@@ -246,7 +277,7 @@ createApp({
       removeEventListener('keyup', keyup)
     })
 
-    return { screen, mode, time, round, banner, winner, fighters, particles, shake, beginMatch, nextRound, mobileAction, setBlock }
+    return { screen, mode, time, round, banner, winner, fighters, particles, shake, contactFlash, beginMatch, nextRound, mobileAction, setBlock }
   },
   template: `
     <main class="game-shell">
@@ -255,7 +286,7 @@ createApp({
         <button class="sound-note" aria-label="Sound enabled">SOUND ON</button>
       </section>
 
-      <section class="stage" :class="{ shake }" aria-label="Garden Clash fighting arena">
+      <section class="stage" :class="{ shake, 'contact-flash': contactFlash }" aria-label="Garden Clash fighting arena">
         <div class="sun"></div>
         <div class="cloud cloud-a"></div><div class="cloud cloud-b"></div>
         <div class="mountain mountain-a"></div><div class="mountain mountain-b"></div>
@@ -295,14 +326,16 @@ createApp({
           <button @click="nextRound">{{ fighters.blue.wins >= 2 || fighters.pink.wins >= 2 ? 'REMATCH' : 'NEXT ROUND' }}</button>
         </div>
 
-        <div v-for="p in particles" :key="p.id" class="hit-burst" :style="{ left: p.x + '%', '--burst': p.color }">HIT!</div>
+        <div v-for="p in particles" :key="p.id" class="hit-burst" :class="'burst-' + p.type" :style="{ left: p.x + '%', '--burst': p.color }"><i></i><span>{{ p.label }}</span></div>
 
-        <div class="fighter fighter-blue" :class="{ attacking: fighters.blue.attack, blocking: fighters.blue.block, hurt: fighters.blue.hit, jumping: fighters.blue.y > 0 }" :style="{ left: fighters.blue.x + '%', bottom: (7 + fighters.blue.y * .45) + '%', '--face': fighters.blue.facing }">
-          <div class="fighter-shadow"></div><img src="/assets/ranger-riz.png" alt="Ranger Riz in a navy fighting outfit" draggable="false" />
+        <div class="fighter fighter-blue" :class="{ attacking: fighters.blue.attack, punching: fighters.blue.attackKind === 'punch', kicking: fighters.blue.attackKind === 'kick', blocking: fighters.blue.block, hurt: fighters.blue.hit, moving: fighters.blue.moving, jumping: fighters.blue.y > 0 }" :style="{ left: fighters.blue.x + '%', bottom: (7 + fighters.blue.y * .45) + '%', '--flip': fighters.blue.facing }">
+          <div class="fighter-shadow"></div><div class="motion-trail"></div><div class="sprite" role="img" aria-label="Ranger Riz in a navy fighting outfit"></div>
+          <span class="face-lines">!</span><span class="combo" v-if="fighters.blue.combo > 1">{{ fighters.blue.combo }} HIT COMBO</span>
           <span class="guard-effect">GUARD</span>
         </div>
-        <div class="fighter fighter-pink" :class="{ attacking: fighters.pink.attack, blocking: fighters.pink.block, hurt: fighters.pink.hit, jumping: fighters.pink.y > 0 }" :style="{ left: fighters.pink.x + '%', bottom: (7 + fighters.pink.y * .45) + '%', '--face': fighters.pink.facing }">
-          <div class="fighter-shadow"></div><img src="/assets/swift-amir.png" alt="Swift Amir in a black and white fighting outfit" draggable="false" />
+        <div class="fighter fighter-pink" :class="{ attacking: fighters.pink.attack, punching: fighters.pink.attackKind === 'punch', kicking: fighters.pink.attackKind === 'kick', blocking: fighters.pink.block, hurt: fighters.pink.hit, moving: fighters.pink.moving, jumping: fighters.pink.y > 0 }" :style="{ left: fighters.pink.x + '%', bottom: (7 + fighters.pink.y * .45) + '%', '--flip': -fighters.pink.facing }">
+          <div class="fighter-shadow"></div><div class="motion-trail"></div><div class="sprite" role="img" aria-label="Swift Amir in a black and white fighting outfit"></div>
+          <span class="face-lines">!</span><span class="combo" v-if="fighters.pink.combo > 1">{{ fighters.pink.combo }} HIT COMBO</span>
           <span class="guard-effect">GUARD</span>
         </div>
 
